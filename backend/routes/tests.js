@@ -1,8 +1,8 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
-const { AxePuppeteer } = require('@axe-core/puppeteer');
 const { authenticate } = require('../middleware/auth');
 const { apiLimiter } = require('../middleware/rateLimiter');
+
+// Puppeteer v22+ is ESM-only — load via dynamic import inside the route handler
 
 // Map frontend standard IDs → axe-core tag names
 const STANDARD_TAGS = {
@@ -210,6 +210,9 @@ router.post('/accessibility', async (req, res) => {
 
   let browser;
   try {
+    const { default: puppeteer } = await import('puppeteer');
+    const { AxePuppeteer } = await import('@axe-core/puppeteer');
+
     browser = await puppeteer.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
