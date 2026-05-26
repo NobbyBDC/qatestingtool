@@ -1,0 +1,17 @@
+{
+  "name": "qa-testing-tool",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "dev": "concurrently --names \"API,UI\" --prefix-colors \"cyan,green\" \"npm run dev:api\" \"npm run dev:ui\"",
+    "dev:api": "cd backend && npm run dev",
+    "dev:ui": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "start": "concurrently --names \"API,UI\" --prefix-colors \"cyan,green\" \"npm run start:api\" \"npm run build\"",
+    "start:api": "cd backend && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+
+# Environment — never commit real secrets
+backend/.env
+
+# Generated database
+backend/db/data.json
