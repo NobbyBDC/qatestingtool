@@ -121,8 +121,10 @@ router.post('/zap', async (req, res) => {
 
 // POST /api/tests/sonar
 router.post('/sonar', async (req, res) => {
-  const { repoUrl, githubToken, projectKey } = req.body;
+  const { sonarUrl, sonarToken, repoUrl, githubToken, projectKey } = req.body;
   if (!repoUrl) return res.status(400).json({ error: 'Repository URL is required' });
+
+  const baseUrl = (sonarUrl || 'https://sonarcloud.io').replace(/\/$/, '');
 
   let repoData = {};
   try {
@@ -131,18 +133,84 @@ router.post('/sonar', async (req, res) => {
 
     const [, owner, repo] = match;
     const repoName = repo.replace(/\.git$/, '');
+    const resolvedKey = projectKey || `${owner}_${repoName}`;
 
-    const headers = { Accept: 'application/vnd.github.v3+json' };
-    if (githubToken) headers['Authorization'] = `token ${githubToken}`;
+    // Fetch GitHub repo metadata
+    const ghHeaders = { Accept: 'application/vnd.github.v3+json' };
+    if (githubToken) ghHeaders['Authorization'] = `token ${githubToken}`;
 
     const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}`, {
-      headers,
+      headers: ghHeaders,
       signal: AbortSignal.timeout(10000)
     });
     if (ghRes.ok) repoData = await ghRes.json();
 
+    // Attempt real SonarQube API call if a token is provided
+    if (sonarToken) {
+      const sqHeaders = {
+        Authorization: `Bearer ${sonarToken}`,
+        Accept: 'application/json'
+      };
+
+      const [metricsRes, gateRes, issuesRes] = await Promise.all([
+        fetch(`${baseUrl}/api/measures/component?component=${resolvedKey}&metricKeys=ncloc,bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_rating,reliability_rating,sqale_rating,sqale_index`, { headers: sqHeaders, signal: AbortSignal.timeout(15000) }),
+        fetch(`${baseUrl}/api/qualitygates/project_status?projectKey=${resolvedKey}`, { headers: sqHeaders, signal: AbortSignal.timeout(15000) }),
+        fetch(`${baseUrl}/api/issues/search?componentKeys=${resolvedKey}&resolved=false&ps=20`, { headers: sqHeaders, signal: AbortSignal.timeout(15000) })
+      ]);
+
+      if (metricsRes.ok) {
+        const metricsData = await metricsRes.json();
+        const gateData  = gateRes.ok  ? await gateRes.json()   : null;
+        const issuesData = issuesRes.ok ? await issuesRes.json() : null;
+
+        const getMeasure = (key) => metricsData.component?.measures?.find(m => m.metric === key)?.value;
+        const ratingMap  = { 1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E' };
+
+        return res.json({
+          projectKey: resolvedKey,
+          sonarUrl: baseUrl,
+          real: true,
+          repository: {
+            owner, name: repoName,
+            fullName: repoData.full_name || `${owner}/${repoName}`,
+            description: repoData.description || null,
+            language: repoData.language || 'Unknown',
+            stars: repoData.stargazers_count || 0,
+            forks: repoData.forks_count || 0,
+            openIssues: repoData.open_issues_count || 0,
+            defaultBranch: repoData.default_branch || 'main'
+          },
+          timestamp: new Date().toISOString(),
+          qualityGate: { status: gateData?.projectStatus?.status || 'UNKNOWN' },
+          metrics: {
+            linesOfCode: parseInt(getMeasure('ncloc')) || 0,
+            bugs: parseInt(getMeasure('bugs')) || 0,
+            vulnerabilities: parseInt(getMeasure('vulnerabilities')) || 0,
+            codeSmells: parseInt(getMeasure('code_smells')) || 0,
+            coverage: parseFloat(getMeasure('coverage')) || 0,
+            duplication: parseFloat(getMeasure('duplicated_lines_density')) || 0,
+            securityRating: ratingMap[getMeasure('security_rating')] || '?',
+            reliabilityRating: ratingMap[getMeasure('reliability_rating')] || '?',
+            maintainabilityRating: ratingMap[getMeasure('sqale_rating')] || '?',
+            technicalDebt: getMeasure('sqale_index') ? `${Math.round(getMeasure('sqale_index') / 60)}h ${getMeasure('sqale_index') % 60}min` : '?'
+          },
+          issues: (issuesData?.issues || []).map(i => ({
+            key: i.key,
+            type: i.type,
+            severity: i.severity,
+            message: i.message,
+            file: i.component?.split(':').pop() || i.component,
+            line: i.line
+          }))
+        });
+      }
+    }
+
+    // Fall back to demo data when no token or SonarQube unreachable
     res.json({
-      projectKey: projectKey || `${owner}_${repoName}`,
+      projectKey: resolvedKey,
+      sonarUrl: baseUrl,
+      real: false,
       repository: {
         owner,
         name: repoName,

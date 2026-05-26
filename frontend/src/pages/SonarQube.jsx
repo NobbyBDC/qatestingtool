@@ -40,6 +40,8 @@ function MetricCard({ label, value, sub, color = 'text-white' }) {
 }
 
 export default function SonarQube() {
+  const [sonarUrl, setSonarUrl] = useState('https://sonarcloud.io');
+  const [sonarToken, setSonarToken] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [githubToken, setGithubToken] = useState('');
   const [projectKey, setProjectKey] = useState('');
@@ -54,6 +56,8 @@ export default function SonarQube() {
     setResults(null);
     try {
       const { data } = await api.post('/tests/sonar', {
+        sonarUrl: sonarUrl || 'https://sonarcloud.io',
+        sonarToken: sonarToken || undefined,
         repoUrl,
         githubToken: githubToken || undefined,
         projectKey: projectKey || undefined
@@ -91,44 +95,83 @@ export default function SonarQube() {
 
       <div className="bg-slate-900 rounded-2xl border border-slate-800 p-6 mb-6">
         <form onSubmit={run} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-1.5">GitHub Repository URL</label>
-            <input
-              type="url"
-              value={repoUrl}
-              onChange={e => setRepoUrl(e.target.value)}
-              placeholder="https://github.com/owner/repo"
-              required
-              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm font-mono focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
-            />
+
+          {/* SonarQube server */}
+          <div className="pb-4 border-b border-slate-800">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">SonarQube / SonarCloud</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5">SonarQube URL</label>
+                <input
+                  type="url"
+                  value={sonarUrl}
+                  onChange={e => setSonarUrl(e.target.value)}
+                  placeholder="https://sonarcloud.io"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm font-mono focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                />
+                <p className="text-xs text-slate-500 mt-1">Use <span className="font-mono">https://sonarcloud.io</span> for SonarCloud, or your self-hosted URL</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5">
+                  SonarQube Token{' '}
+                  <span className="text-slate-500 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="password"
+                  value={sonarToken}
+                  onChange={e => setSonarToken(e.target.value)}
+                  placeholder="squ_xxxxxxxxxxxx"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                />
+              </div>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1.5">
-                GitHub Token{' '}
-                <span className="text-slate-500 font-normal">(optional, for private repos)</span>
-              </label>
-              <input
-                type="password"
-                value={githubToken}
-                onChange={e => setGithubToken(e.target.value)}
-                placeholder="ghp_xxxxxxxxxxxx"
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1.5">
-                Project Key{' '}
-                <span className="text-slate-500 font-normal">(optional)</span>
-              </label>
-              <input
-                type="text"
-                value={projectKey}
-                onChange={e => setProjectKey(e.target.value)}
-                placeholder="my-org_my-repo"
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
-              />
+          {/* GitHub repo */}
+          <div>
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">GitHub Repository</p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5">Repository URL</label>
+                <input
+                  type="url"
+                  value={repoUrl}
+                  onChange={e => setRepoUrl(e.target.value)}
+                  placeholder="https://github.com/owner/repo"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm font-mono focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-1.5">
+                    GitHub Token{' '}
+                    <span className="text-slate-500 font-normal">(private repos)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={githubToken}
+                    onChange={e => setGithubToken(e.target.value)}
+                    placeholder="ghp_xxxxxxxxxxxx"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-1.5">
+                    Project Key{' '}
+                    <span className="text-slate-500 font-normal">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={projectKey}
+                    onChange={e => setProjectKey(e.target.value)}
+                    placeholder="my-org_my-repo"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
@@ -165,6 +208,10 @@ export default function SonarQube() {
                 <div className="flex items-center gap-3 mt-2 text-xs text-slate-500">
                   {results.repository?.language && <span>{results.repository.language}</span>}
                   {results.repository?.stars !== undefined && <span>★ {results.repository.stars.toLocaleString()}</span>}
+                  {results.sonarUrl && <span className="font-mono">{results.sonarUrl}</span>}
+                  {!results.real && (
+                    <span className="text-yellow-500">(demo data — add SonarQube token for real metrics)</span>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-3">
