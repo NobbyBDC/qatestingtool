@@ -1,5 +1,7 @@
 const express = require('express');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { authenticate } = require('../middleware/auth');
 const { apiLimiter } = require('../middleware/rateLimiter');
 
@@ -119,168 +121,150 @@ router.post('/zap', async (req, res) => {
   }
 });
 
+// Helpers for SonarQube scan
+const RATING_MAP = { '1': 'A', '2': 'B', '3': 'C', '4': 'D', '5': 'E' };
+
+function getMeasure(measures, key) {
+  return measures?.find(m => m.metric === key)?.value ?? null;
+}
+
+async function pollTask(baseUrl, taskId, sqHeaders, maxMs = 120000) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 4000));
+    const r = await fetch(`${baseUrl}/api/ce/task?id=${taskId}`, { headers: sqHeaders });
+    if (!r.ok) continue;
+    const { task } = await r.json();
+    if (task.status === 'SUCCESS') return;
+    if (task.status === 'FAILED' || task.status === 'CANCELLED') {
+      throw new Error(`Scan ${task.status.toLowerCase()}: ${task.errorMessage || 'unknown error'}`);
+    }
+  }
+  throw new Error('Scan timed out waiting for SonarQube to finish analysis');
+}
+
+async function fetchMetrics(baseUrl, projectKey, sqHeaders) {
+  const [metricsRes, gateRes, issuesRes] = await Promise.all([
+    fetch(`${baseUrl}/api/measures/component?component=${projectKey}&metricKeys=ncloc,bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_rating,reliability_rating,sqale_rating,sqale_index`, { headers: sqHeaders }),
+    fetch(`${baseUrl}/api/qualitygates/project_status?projectKey=${projectKey}`, { headers: sqHeaders }),
+    fetch(`${baseUrl}/api/issues/search?componentKeys=${projectKey}&resolved=false&ps=20`, { headers: sqHeaders })
+  ]);
+
+  const metricsData = metricsRes.ok ? await metricsRes.json() : {};
+  const gateData    = gateRes.ok   ? await gateRes.json()    : {};
+  const issuesData  = issuesRes.ok ? await issuesRes.json()  : {};
+  const measures    = metricsData.component?.measures || [];
+
+  const sqaleMin = parseInt(getMeasure(measures, 'sqale_index')) || 0;
+
+  return {
+    qualityGate: { status: gateData.projectStatus?.status || 'UNKNOWN' },
+    metrics: {
+      linesOfCode:          parseInt(getMeasure(measures, 'ncloc'))                      || 0,
+      bugs:                 parseInt(getMeasure(measures, 'bugs'))                       || 0,
+      vulnerabilities:      parseInt(getMeasure(measures, 'vulnerabilities'))            || 0,
+      codeSmells:           parseInt(getMeasure(measures, 'code_smells'))               || 0,
+      coverage:             parseFloat(getMeasure(measures, 'coverage'))                || 0,
+      duplication:          parseFloat(getMeasure(measures, 'duplicated_lines_density'))|| 0,
+      securityRating:       RATING_MAP[getMeasure(measures, 'security_rating')]         || '?',
+      reliabilityRating:    RATING_MAP[getMeasure(measures, 'reliability_rating')]      || '?',
+      maintainabilityRating:RATING_MAP[getMeasure(measures, 'sqale_rating')]            || '?',
+      technicalDebt:        sqaleMin ? `${Math.floor(sqaleMin/60)}h ${sqaleMin%60}min` : '0min'
+    },
+    issues: (issuesData.issues || []).map(i => ({
+      key:      i.key,
+      type:     i.type,
+      severity: i.severity,
+      message:  i.message,
+      file:     i.component?.split(':').pop() || i.component,
+      line:     i.line
+    }))
+  };
+}
+
 // POST /api/tests/sonar
 router.post('/sonar', async (req, res) => {
-  const { sonarUrl, sonarToken, repoUrl, githubToken, projectKey } = req.body;
-  if (!repoUrl) return res.status(400).json({ error: 'Repository URL is required' });
+  const { sonarUrl, sonarToken, sonarOrg, repoUrl, githubToken, projectKey } = req.body;
 
-  const baseUrl = (sonarUrl || 'https://sonarcloud.io').replace(/\/$/, '');
+  if (!repoUrl)    return res.status(400).json({ error: 'Repository URL is required' });
+  if (!sonarToken) return res.status(400).json({ error: 'SonarQube token is required to run a scan' });
 
-  let repoData = {};
+  const baseUrl      = (sonarUrl || 'https://sonarcloud.io').replace(/\/$/, '');
+  const isSonarCloud = baseUrl.includes('sonarcloud.io');
+  const sqHeaders    = { Authorization: `Bearer ${sonarToken}`, Accept: 'application/json' };
+
+  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
+  if (!match) return res.status(400).json({ error: 'Invalid GitHub repository URL' });
+
+  const [, owner, rawRepo] = match;
+  const repoName    = rawRepo.replace(/\.git$/, '');
+  const resolvedKey = projectKey || `${owner}_${repoName}`;
+  const organization = sonarOrg || (isSonarCloud ? owner : null);
+
+  const tmpDir = path.join(os.tmpdir(), `sonar-${Date.now()}`);
+
   try {
-    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
-    if (!match) return res.status(400).json({ error: 'Invalid GitHub repository URL' });
-
-    const [, owner, repo] = match;
-    const repoName = repo.replace(/\.git$/, '');
-    const resolvedKey = projectKey || `${owner}_${repoName}`;
-
-    // Fetch GitHub repo metadata
+    // 1. Fetch GitHub metadata
     const ghHeaders = { Accept: 'application/vnd.github.v3+json' };
     if (githubToken) ghHeaders['Authorization'] = `token ${githubToken}`;
-
-    const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}`, {
-      headers: ghHeaders,
-      signal: AbortSignal.timeout(10000)
-    });
+    let repoData = {};
+    const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}`, { headers: ghHeaders, signal: AbortSignal.timeout(10000) });
     if (ghRes.ok) repoData = await ghRes.json();
 
-    // Attempt real SonarQube API call if a token is provided
-    if (sonarToken) {
-      const sqHeaders = {
-        Authorization: `Bearer ${sonarToken}`,
-        Accept: 'application/json'
-      };
+    // 2. Clone repo (shallow)
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const { simpleGit } = require('simple-git');
+    const cloneUrl = githubToken
+      ? repoUrl.replace('https://', `https://x-access-token:${githubToken}@`).replace(/\.git$/, '') + '.git'
+      : repoUrl.replace(/\.git$/, '') + '.git';
+    await simpleGit().clone(cloneUrl, tmpDir, ['--depth', '1']);
 
-      const [metricsRes, gateRes, issuesRes] = await Promise.all([
-        fetch(`${baseUrl}/api/measures/component?component=${resolvedKey}&metricKeys=ncloc,bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_rating,reliability_rating,sqale_rating,sqale_index`, { headers: sqHeaders, signal: AbortSignal.timeout(15000) }),
-        fetch(`${baseUrl}/api/qualitygates/project_status?projectKey=${resolvedKey}`, { headers: sqHeaders, signal: AbortSignal.timeout(15000) }),
-        fetch(`${baseUrl}/api/issues/search?componentKeys=${resolvedKey}&resolved=false&ps=20`, { headers: sqHeaders, signal: AbortSignal.timeout(15000) })
-      ]);
+    // 3. Run sonar-scanner
+    const { scan } = require('sonarqube-scanner');
+    const scanOptions = {
+      'sonar.projectKey':     resolvedKey,
+      'sonar.projectName':    repoData.full_name || `${owner}/${repoName}`,
+      'sonar.sources':        '.',
+      'sonar.projectBaseDir': tmpDir,
+      'sonar.scm.disabled':   'true'
+    };
+    if (organization) scanOptions['sonar.organization'] = organization;
 
-      if (metricsRes.ok) {
-        const metricsData = await metricsRes.json();
-        const gateData  = gateRes.ok  ? await gateRes.json()   : null;
-        const issuesData = issuesRes.ok ? await issuesRes.json() : null;
+    await scan({ serverUrl: baseUrl, token: sonarToken, options: scanOptions });
 
-        const getMeasure = (key) => metricsData.component?.measures?.find(m => m.metric === key)?.value;
-        const ratingMap  = { 1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E' };
-
-        return res.json({
-          projectKey: resolvedKey,
-          sonarUrl: baseUrl,
-          real: true,
-          repository: {
-            owner, name: repoName,
-            fullName: repoData.full_name || `${owner}/${repoName}`,
-            description: repoData.description || null,
-            language: repoData.language || 'Unknown',
-            stars: repoData.stargazers_count || 0,
-            forks: repoData.forks_count || 0,
-            openIssues: repoData.open_issues_count || 0,
-            defaultBranch: repoData.default_branch || 'main'
-          },
-          timestamp: new Date().toISOString(),
-          qualityGate: { status: gateData?.projectStatus?.status || 'UNKNOWN' },
-          metrics: {
-            linesOfCode: parseInt(getMeasure('ncloc')) || 0,
-            bugs: parseInt(getMeasure('bugs')) || 0,
-            vulnerabilities: parseInt(getMeasure('vulnerabilities')) || 0,
-            codeSmells: parseInt(getMeasure('code_smells')) || 0,
-            coverage: parseFloat(getMeasure('coverage')) || 0,
-            duplication: parseFloat(getMeasure('duplicated_lines_density')) || 0,
-            securityRating: ratingMap[getMeasure('security_rating')] || '?',
-            reliabilityRating: ratingMap[getMeasure('reliability_rating')] || '?',
-            maintainabilityRating: ratingMap[getMeasure('sqale_rating')] || '?',
-            technicalDebt: getMeasure('sqale_index') ? `${Math.round(getMeasure('sqale_index') / 60)}h ${getMeasure('sqale_index') % 60}min` : '?'
-          },
-          issues: (issuesData?.issues || []).map(i => ({
-            key: i.key,
-            type: i.type,
-            severity: i.severity,
-            message: i.message,
-            file: i.component?.split(':').pop() || i.component,
-            line: i.line
-          }))
-        });
-      }
+    // 4. Read task ID from scanner report and poll until done
+    const reportPath = path.join(tmpDir, '.scannerwork', 'report-task.txt');
+    if (fs.existsSync(reportPath)) {
+      const reportContent = fs.readFileSync(reportPath, 'utf8');
+      const taskMatch     = reportContent.match(/ceTaskId=(.+)/);
+      if (taskMatch) await pollTask(baseUrl, taskMatch[1].trim(), sqHeaders);
     }
 
-    // Fall back to demo data when no token or SonarQube unreachable
+    // 5. Fetch final metrics
+    const { qualityGate, metrics, issues } = await fetchMetrics(baseUrl, resolvedKey, sqHeaders);
+
     res.json({
-      projectKey: resolvedKey,
-      sonarUrl: baseUrl,
-      real: false,
+      projectKey:   resolvedKey,
+      sonarUrl:     baseUrl,
+      real:         true,
       repository: {
-        owner,
-        name: repoName,
-        fullName: repoData.full_name || `${owner}/${repoName}`,
-        description: repoData.description || null,
-        language: repoData.language || 'Unknown',
-        stars: repoData.stargazers_count || 0,
-        forks: repoData.forks_count || 0,
-        openIssues: repoData.open_issues_count || 0,
-        defaultBranch: repoData.default_branch || 'main'
+        owner, name: repoName,
+        fullName:      repoData.full_name      || `${owner}/${repoName}`,
+        description:   repoData.description    || null,
+        language:      repoData.language       || 'Unknown',
+        stars:         repoData.stargazers_count || 0,
+        forks:         repoData.forks_count      || 0,
+        openIssues:    repoData.open_issues_count || 0,
+        defaultBranch: repoData.default_branch    || 'main'
       },
       timestamp: new Date().toISOString(),
-      qualityGate: { status: 'PASSED' },
-      metrics: {
-        linesOfCode: 15420,
-        bugs: 3,
-        vulnerabilities: 2,
-        codeSmells: 47,
-        coverage: 72.4,
-        duplication: 8.2,
-        securityRating: 'B',
-        reliabilityRating: 'A',
-        maintainabilityRating: 'A',
-        technicalDebt: '4h 30min'
-      },
-      issues: [
-        {
-          key: 'SQ-001',
-          type: 'BUG',
-          severity: 'MAJOR',
-          message: 'Possible null pointer dereference — check return value before use',
-          file: 'src/api/client.js',
-          line: 42
-        },
-        {
-          key: 'SQ-002',
-          type: 'VULNERABILITY',
-          severity: 'CRITICAL',
-          message: 'Hardcoded credentials detected — use environment variables instead',
-          file: 'src/config/db.js',
-          line: 8
-        },
-        {
-          key: 'SQ-003',
-          type: 'CODE_SMELL',
-          severity: 'MINOR',
-          message: 'Cognitive complexity too high (12 vs max 10)',
-          file: 'src/utils/parser.js',
-          line: 125
-        },
-        {
-          key: 'SQ-004',
-          type: 'BUG',
-          severity: 'MAJOR',
-          message: 'React Hook used conditionally — hooks must be called at the top level',
-          file: 'src/components/Widget.jsx',
-          line: 67
-        },
-        {
-          key: 'SQ-005',
-          type: 'CODE_SMELL',
-          severity: 'MAJOR',
-          message: 'Function has too many parameters (8). Extract into an options object.',
-          file: 'src/lib/report.js',
-          line: 33
-        }
-      ]
+      qualityGate, metrics, issues
     });
+
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Analysis failed' });
+    res.status(500).json({ error: err.message || 'Scan failed' });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 });
 

@@ -42,10 +42,12 @@ function MetricCard({ label, value, sub, color = 'text-white' }) {
 export default function SonarQube() {
   const [sonarUrl, setSonarUrl] = useState('https://sonarcloud.io');
   const [sonarToken, setSonarToken] = useState('');
+  const [sonarOrg, setSonarOrg] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [githubToken, setGithubToken] = useState('');
   const [projectKey, setProjectKey] = useState('');
   const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState('');
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
 
@@ -53,18 +55,22 @@ export default function SonarQube() {
     e.preventDefault();
     setError('');
     setLoading(true);
+    setStatus('Starting scan…');
     setResults(null);
     try {
       const { data } = await api.post('/tests/sonar', {
         sonarUrl: sonarUrl || 'https://sonarcloud.io',
         sonarToken: sonarToken || undefined,
+        sonarOrg: sonarOrg || undefined,
         repoUrl,
         githubToken: githubToken || undefined,
         projectKey: projectKey || undefined
-      });
+      }, { timeout: 300000 }); // 5 min — scan can take time
       setResults(data);
+      setStatus('');
     } catch (err) {
       setError(err.response?.data?.error || 'Analysis failed. Please try again.');
+      setStatus('');
     } finally {
       setLoading(false);
     }
@@ -110,18 +116,30 @@ export default function SonarQube() {
                   required
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm font-mono focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
                 />
-                <p className="text-xs text-slate-500 mt-1">Use <span className="font-mono">https://sonarcloud.io</span> for SonarCloud, or your self-hosted URL</p>
+                <p className="text-xs text-slate-500 mt-1">SonarCloud: <span className="font-mono">https://sonarcloud.io</span></p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-1.5">
-                  SonarQube Token{' '}
-                  <span className="text-slate-500 font-normal">(optional)</span>
+                  SonarQube Token <span className="text-slate-500 font-normal">(required)</span>
                 </label>
                 <input
                   type="password"
                   value={sonarToken}
                   onChange={e => setSonarToken(e.target.value)}
                   placeholder="squ_xxxxxxxxxxxx"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5">
+                  Organization <span className="text-slate-500 font-normal">(SonarCloud only)</span>
+                </label>
+                <input
+                  type="text"
+                  value={sonarOrg}
+                  onChange={e => setSonarOrg(e.target.value)}
+                  placeholder="my-github-org"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/50 transition-all"
                 />
               </div>
@@ -175,16 +193,24 @@ export default function SonarQube() {
             </div>
           </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-5 py-2.5 rounded-xl transition-all text-sm"
-          >
-            {loading
-              ? <><span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full spin" /> Analysing…</>
-              : <><Play className="w-3.5 h-3.5" /> Run Analysis</>
-            }
-          </button>
+          <div className="flex items-center gap-4">
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-5 py-2.5 rounded-xl transition-all text-sm"
+            >
+              {loading
+                ? <><span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full spin" /> Running…</>
+                : <><Play className="w-3.5 h-3.5" /> Run Analysis</>
+              }
+            </button>
+            {loading && status && (
+              <span className="text-xs text-slate-400 animate-pulse">{status}</span>
+            )}
+            {loading && (
+              <span className="text-xs text-slate-500">This may take 1–3 minutes</span>
+            )}
+          </div>
         </form>
       </div>
 
