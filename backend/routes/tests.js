@@ -65,7 +65,7 @@ router.post('/zap', async (req, res) => {
   const { url, apiKey } = req.body;
   if (!url) return res.status(400).json({ error: 'Target URL is required' });
 
-  const zapBase   = process.env.ZAP_URL || 'http://localhost:8080';
+  const zapBase   = process.env.ZAP_URL || 'http://localhost:8090';
   const zapKey    = apiKey || process.env.ZAP_API_KEY || 'changeme';
   const zapHeaders = { 'X-ZAP-API-Key': zapKey };
 
