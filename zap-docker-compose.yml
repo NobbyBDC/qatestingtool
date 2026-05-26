@@ -3,16 +3,16 @@ services:
     image: ghcr.io/zaproxy/zaproxy:stable
     container_name: zap
     restart: unless-stopped
-    command: zap.sh -daemon -host 0.0.0.0 -port 8090
+    command: zap.sh -daemon -host 0.0.0.0 -port 8050
       -config api.key=${ZAP_API_KEY:-changeme}
       -config api.addrs.addr.name=.*
       -config api.addrs.addr.regex=true
     ports:
-      - "127.0.0.1:8090:8090"   # bind to localhost only — not exposed publicly
+      - "127.0.0.1:8050:8050"   # bind to localhost only — not exposed publicly
     tmpfs:
       - /zap/wrk
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8090/JSON/core/view/version/?apikey=${ZAP_API_KEY:-changeme}"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8050/JSON/core/view/version/?apikey=${ZAP_API_KEY:-changeme}"]
       interval: 30s
       timeout: 10s
       retries: 5
