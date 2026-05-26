@@ -1,8 +1,21 @@
 const express = require('express');
+const fs = require('fs');
 const { authenticate } = require('../middleware/auth');
 const { apiLimiter } = require('../middleware/rateLimiter');
 
 // Puppeteer v22+ is ESM-only — load via dynamic import inside the route handler
+
+// Prefer system Chromium on Linux servers (avoids missing shared-library errors
+// that occur with puppeteer's bundled Chrome on minimal server installs).
+function findSystemChrome() {
+  const candidates = [
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome'
+  ];
+  return candidates.find(p => fs.existsSync(p)) || null;
+}
 
 // Map frontend standard IDs → axe-core tag names
 const STANDARD_TAGS = {
@@ -213,9 +226,11 @@ router.post('/accessibility', async (req, res) => {
     const { default: puppeteer } = await import('puppeteer');
     const { AxePuppeteer } = await import('@axe-core/puppeteer');
 
+    const executablePath = findSystemChrome();
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      ...(executablePath ? { executablePath } : {}),
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
     });
 
     const page = await browser.newPage();
