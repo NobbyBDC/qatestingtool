@@ -41,81 +41,123 @@ function extractWcag(tags = []) {
 const router = express.Router();
 router.use(authenticate, apiLimiter);
 
+// Risk code → severity label (ZAP uses 0–3, no "CRITICAL" natively)
+const ZAP_RISK = { 3: 'HIGH', 2: 'MEDIUM', 1: 'LOW', 0: 'INFO' };
+
+// Poll a ZAP active scan until it reaches 100%
+async function pollZapScan(zapBase, scanId, apiKey, maxMs = 180000) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    const r = await fetch(
+      `${zapBase}/JSON/ascan/view/status/?scanId=${scanId}&apikey=${apiKey}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (!r.ok) continue;
+    const { status } = await r.json();
+    if (parseInt(status) >= 100) return;
+  }
+  throw new Error('ZAP scan timed out after 3 minutes');
+}
+
 // POST /api/tests/zap
 router.post('/zap', async (req, res) => {
   const { url, apiKey } = req.body;
   if (!url) return res.status(400).json({ error: 'Target URL is required' });
 
+  const zapBase   = process.env.ZAP_URL || 'http://localhost:8080';
+  const zapKey    = apiKey || process.env.ZAP_API_KEY || 'changeme';
+  const zapHeaders = { 'X-ZAP-API-Key': zapKey };
+
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['X-ZAP-API-Key'] = apiKey;
+    // 1. Spider the target first (passive crawl)
+    const spiderRes = await fetch(
+      `${zapBase}/JSON/spider/action/scan/?url=${encodeURIComponent(url)}&apikey=${zapKey}`,
+      { method: 'GET', headers: zapHeaders, signal: AbortSignal.timeout(10000) }
+    );
+    if (!spiderRes.ok) throw new Error('ZAP not reachable');
+    const { scan: spiderId } = await spiderRes.json();
 
-    const response = await fetch('https://api.zaproxy.org/api/v1/ascan', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ url, recurse: true }),
-      signal: AbortSignal.timeout(8000)
-    });
+    // Wait for spider to finish (max 60s)
+    const spiderDeadline = Date.now() + 60000;
+    while (Date.now() < spiderDeadline) {
+      await new Promise(r => setTimeout(r, 2000));
+      const sr = await fetch(
+        `${zapBase}/JSON/spider/view/status/?scanId=${spiderId}&apikey=${zapKey}`,
+        { signal: AbortSignal.timeout(5000) }
+      );
+      if (sr.ok) {
+        const { status } = await sr.json();
+        if (parseInt(status) >= 100) break;
+      }
+    }
 
-    if (response.ok) return res.json(await response.json());
-    throw new Error('ZAP API unavailable');
-  } catch {
-    // Demo data — real ZAP requires a running ZAP instance
-    res.json({
-      scanId: `ZAP-${Date.now()}`,
-      status: 'completed',
+    // 2. Active scan
+    const ascanRes = await fetch(
+      `${zapBase}/JSON/ascan/action/scan/?url=${encodeURIComponent(url)}&recurse=true&apikey=${zapKey}`,
+      { method: 'GET', headers: zapHeaders, signal: AbortSignal.timeout(10000) }
+    );
+    if (!ascanRes.ok) throw new Error('Could not start active scan');
+    const { scan: scanId } = await ascanRes.json();
+    await pollZapScan(zapBase, scanId, zapKey);
+
+    // 3. Fetch alerts
+    const alertsRes = await fetch(
+      `${zapBase}/JSON/core/view/alerts/?baseurl=${encodeURIComponent(url)}&apikey=${zapKey}`,
+      { headers: zapHeaders, signal: AbortSignal.timeout(10000) }
+    );
+    if (!alertsRes.ok) throw new Error('Could not fetch alerts');
+    const { alerts } = await alertsRes.json();
+
+    // 4. Shape into frontend format
+    const RISK_ORDER = { HIGH: 0, MEDIUM: 1, LOW: 2, INFO: 3 };
+    const vulnerabilities = alerts
+      .map((a, i) => ({
+        id:          `ZAP-${String(i + 1).padStart(3, '0')}`,
+        name:        a.alert,
+        severity:    ZAP_RISK[parseInt(a.riskcode)] || 'LOW',
+        cwe:         a.cweid ? `CWE-${a.cweid}` : null,
+        description: a.desc?.replace(/<[^>]+>/g, '').trim(),
+        solution:    a.solution?.replace(/<[^>]+>/g, '').trim(),
+        url:         a.url || url,
+        confidence:  a.confidence
+      }))
+      .sort((a, b) => (RISK_ORDER[a.severity] ?? 4) - (RISK_ORDER[b.severity] ?? 4));
+
+    const summary = vulnerabilities.reduce(
+      (acc, v) => { acc[v.severity.toLowerCase()] = (acc[v.severity.toLowerCase()] || 0) + 1; return acc; },
+      { high: 0, medium: 0, low: 0, info: 0 }
+    );
+
+    return res.json({
+      scanId:   `ZAP-${Date.now()}`,
+      status:   'completed',
+      real:     true,
       url,
       timestamp: new Date().toISOString(),
-      summary: { total: 6, critical: 1, high: 2, medium: 2, low: 1 },
+      summary:  { total: vulnerabilities.length, critical: 0, ...summary },
+      vulnerabilities
+    });
+
+  } catch (err) {
+    // ZAP not running — fall back to demo data
+    const isUnavailable = err.message.includes('not reachable') || err.code === 'ECONNREFUSED' || err.name === 'TimeoutError';
+    if (!isUnavailable) return res.status(500).json({ error: err.message });
+
+    res.json({
+      scanId: `ZAP-DEMO-${Date.now()}`,
+      status: 'completed',
+      real:   false,
+      url,
+      timestamp: new Date().toISOString(),
+      summary: { total: 6, critical: 0, high: 2, medium: 2, low: 2 },
       vulnerabilities: [
-        {
-          id: 'ZAPV-001',
-          name: 'SQL Injection',
-          severity: 'CRITICAL',
-          cwe: 'CWE-89',
-          description: 'Possible SQL injection vulnerability detected in query parameter. User-supplied data is included in an SQL query without proper sanitisation.',
-          url: `${url}/login?id=1`
-        },
-        {
-          id: 'ZAPV-002',
-          name: 'Cross-Site Scripting (Reflected)',
-          severity: 'HIGH',
-          cwe: 'CWE-79',
-          description: 'Reflected XSS vulnerability found in search parameter. Script injected via user input is reflected in the response without encoding.',
-          url: `${url}/search?q=<script>`
-        },
-        {
-          id: 'ZAPV-003',
-          name: 'Missing Content-Security-Policy Header',
-          severity: 'HIGH',
-          cwe: 'CWE-693',
-          description: 'Content-Security-Policy header is absent. Without CSP, browsers cannot restrict resource loading which increases XSS risk.',
-          url
-        },
-        {
-          id: 'ZAPV-004',
-          name: 'Session Cookie Without Secure Flag',
-          severity: 'MEDIUM',
-          cwe: 'CWE-614',
-          description: 'Session cookie is missing the Secure attribute. The cookie may be transmitted over unencrypted HTTP connections.',
-          url
-        },
-        {
-          id: 'ZAPV-005',
-          name: 'Server Version Disclosure',
-          severity: 'MEDIUM',
-          cwe: 'CWE-200',
-          description: 'Web server version is exposed in response headers (Server: Apache/2.4.51). Attackers can use this to target known vulnerabilities.',
-          url
-        },
-        {
-          id: 'ZAPV-006',
-          name: 'Outdated JavaScript Library',
-          severity: 'LOW',
-          cwe: 'CWE-1035',
-          description: 'jQuery 1.12.4 detected which has multiple known vulnerabilities. Upgrade to the latest version.',
-          url
-        }
+        { id: 'ZAP-001', name: 'Cross-Site Scripting (Reflected)', severity: 'HIGH', cwe: 'CWE-79', description: 'Reflected XSS found in search parameter. User-supplied input is returned in the response without encoding.', url: `${url}/search?q=test` },
+        { id: 'ZAP-002', name: 'Missing Content-Security-Policy Header', severity: 'HIGH', cwe: 'CWE-693', description: 'Content-Security-Policy header is absent. Without CSP, browsers cannot restrict resource loading.', url },
+        { id: 'ZAP-003', name: 'Session Cookie Without Secure Flag', severity: 'MEDIUM', cwe: 'CWE-614', description: 'Session cookie is missing the Secure attribute and may be sent over unencrypted connections.', url },
+        { id: 'ZAP-004', name: 'Server Version Disclosure', severity: 'MEDIUM', cwe: 'CWE-200', description: 'Web server version is exposed in response headers. Attackers can use this to target known vulnerabilities.', url },
+        { id: 'ZAP-005', name: 'X-Frame-Options Header Not Set', severity: 'LOW', cwe: 'CWE-1021', description: 'X-Frame-Options header is missing. The page may be embedded in an iframe enabling clickjacking attacks.', url },
+        { id: 'ZAP-006', name: 'Outdated JavaScript Library', severity: 'LOW', cwe: 'CWE-1035', description: 'jQuery 1.12.4 detected. This version has multiple known vulnerabilities. Upgrade to the latest release.', url }
       ]
     });
   }
