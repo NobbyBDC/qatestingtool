@@ -11,6 +11,10 @@ const testRoutes = require('./routes/tests');
 
 const app = express();
 
+// Trust the first proxy (nginx/Apache) so rate-limiter reads the real client IP
+// from X-Forwarded-For rather than the proxy's IP
+app.set('trust proxy', 1);
+
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 app.use(cors({
